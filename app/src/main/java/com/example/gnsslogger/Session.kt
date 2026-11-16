@@ -16,11 +16,11 @@ import java.util.*
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocketFactory
-import kotlin.math.abs
+import kotlin.math.*
 
 /** Recording session: lives outside the activities so it keeps running while you switch screens. */
 object Session {
-    class Pt(val lat: Double, val lon: Double, val q: Int, val marked: Boolean)
+    class Pt(val lat: Double, val lon: Double, val q: Int, val marked: Boolean, val sess: Int = 0, val avg: Boolean = false)
     class Item(val key: String, val label: String)
     private class Cfg(val dev: String, val baud: Int, val host: String, val port: Int,
                       val mount: String, val user: String, val pass: String, val tls: Boolean, val crs: String)
@@ -47,6 +47,15 @@ object Session {
     @Volatile private var rmcDate: String? = null
     private var ntripSock: Socket? = null
     private var markCount = 0
+    // per-recording-period state
+    @Volatile private var sessNo = 0
+    private var sessCounter = 0
+    private val fixes = ArrayList<DoubleArray>()   // lat, lon, height, weight, fix quality
+    private var outDir: File? = null
+    private var logName = ""
+    private var sessCrs = "EPSG:4326"
+    private var sessStartMs = 0L
+    @Volatile private var statThresh = 1.0
 
     fun listDevices(ctx: Context): List<Item> {
         val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
@@ -77,7 +86,9 @@ object Session {
         val dir = app.getExternalFilesDir(null)!!
         val logFile = File(dir, "gnss_log_$stamp.csv")
         val marksFile = File(dir, "gnss_log_${stamp}_points.csv")
-        synchronized(points) { points.clear() }
+        sessNo = sessCounter++; synchronized(fixes) { fixes.clear() }
+        outDir = dir; logName = logFile.name; sessCrs = c.crs; sessStartMs = System.currentTimeMillis()
+        statThresh = p.getString("stat", "1.0")!!.toDoubleOrNull() ?: 1.0
         count = 0; rtcmBytes = 0; markCount = 0; pendingMark = null
         fixName = "no fix"; lastLat = Double.NaN; lastLon = Double.NaN
         message = "Connecting..."; running = true
@@ -86,15 +97,69 @@ object Session {
         onUpdate?.invoke()
     }
 
-    fun stop(reason: String? = null) {
+    @Synchronized fun stop(reason: String? = null) {
         val was = running
         running = false
         try { link?.close() } catch (_: Exception) {}
         link = null
         try { ntripSock?.close() } catch (_: Exception) {}
         ntripStatus = "idle"
-        message = reason ?: if (was) "Stopped - $count points saved" else message
+        val tail = if (was) finishAverage() else ""
+        message = if (reason != null) reason + tail else if (was) "Stopped - $count points saved$tail" else message
         onUpdate?.invoke()
+    }
+
+    private fun addFix(lat: Double, lon: Double, h: Double, q: Int, hdop: Double) {
+        val qw = when (q) { 4 -> 1.0; 5 -> 0.25; 2 -> 0.05; else -> 0.02 }   // RTK fixed counts most
+        val d = max(hdop, 0.5)
+        synchronized(fixes) { fixes.add(doubleArrayOf(lat, lon, h, qw / (d * d), q.toDouble())) }
+    }
+
+    /** At the end of a recording: if the antenna stayed put, save a weighted average and draw it as a diamond. */
+    private fun finishAverage(): String {
+        val fx = synchronized(fixes) { ArrayList(fixes).also { fixes.clear() } }
+        val n = fx.size
+        if (n < 5) return ""
+        var sw = 0.0; var sLat = 0.0; var sLon = 0.0; var sH = 0.0; var swH = 0.0
+        for (f in fx) {
+            sw += f[3]; sLat += f[3] * f[0]; sLon += f[3] * f[1]
+            if (!f[2].isNaN()) { sH += f[3] * f[2]; swH += f[3] }
+        }
+        val mLat = sLat / sw; val mLon = sLon / sw; val mH = if (swH > 0) sH / swH else Double.NaN
+        val kN = 111320.0; val kE = 111320.0 * cos(Math.toRadians(mLat))
+        val dist = DoubleArray(n); var vE = 0.0; var vN = 0.0; var vH = 0.0; var fixed = 0
+        for ((i, f) in fx.withIndex()) {
+            val dn = (f[0] - mLat) * kN; val de = (f[1] - mLon) * kE
+            dist[i] = sqrt(dn * dn + de * de)
+            vE += f[3] * de * de; vN += f[3] * dn * dn
+            if (!f[2].isNaN()) vH += f[3] * (f[2] - mH) * (f[2] - mH)
+            if (f[4] == 4.0) fixed++
+        }
+        dist.sort()
+        val p95 = dist[min(n - 1, (n * 0.95).toInt())]
+        if (p95 > statThresh) return "\nMoved too much to average (95%% radius %.2f m > %.2f m)".format(Locale.US, p95, statThresh)
+
+        val sdH = sqrt((vE + vN) / sw); val sdV = if (swH > 0) sqrt(vH / swH) else Double.NaN
+        val iso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
+        val en = try { Proj.forward(sessCrs, mLat, mLon) } catch (_: Exception) { null }
+        val fm = if (en != null && (abs(en.e) > 180 || abs(en.n) > 90)) "%.4f" else "%.9f"
+        val crsCols = if (en != null) "${en.spec},${String.format(Locale.US, fm, en.e)},${String.format(Locale.US, fm, en.n)}" else ",,"
+        val row = String.format(Locale.US, "%s,%s,%d,%d,%.9f,%.9f,%s,%.4f,%s,%.1f,%.4f,%s,%s",
+            iso.format(Date(sessStartMs)), iso.format(Date()), n, (System.currentTimeMillis() - sessStartMs) / 1000,
+            mLat, mLon, if (mH.isNaN()) "" else String.format(Locale.US, "%.4f", mH), sdH,
+            if (sdV.isNaN()) "" else String.format(Locale.US, "%.4f", sdV), 100.0 * fixed / n, p95, crsCols, logName)
+        outDir?.let { dir ->
+            try {
+                val af = File(dir, "gnss_averages.csv")
+                val isNew = !af.exists()
+                FileWriter(af, true).use { w ->
+                    if (isNew) w.write("start_utc,end_utc,n_fixes,duration_s,lat_wgs84_deg,lon_wgs84_deg,ellipsoidal_height_m,sd_horiz_m,sd_vert_m,pct_rtk_fixed,radius95_m,crs,easting,northing,log_file\n")
+                    w.write(row + "\n")
+                }
+            } catch (_: Exception) {}
+        }
+        synchronized(points) { points.add(Pt(mLat, mLon, 4, false, sessNo, true)) }
+        return "\nAverage of $n fixes saved (sd %.1f cm)".format(Locale.US, sdH * 100)
     }
 
     private fun openLink(app: Context, c: Cfg): Link {
@@ -170,6 +235,7 @@ object Session {
                     val crsCols = if (en != null) "${en.spec},${String.format(Locale.US, fm, en.e)},${String.format(Locale.US, fm, en.n)}" else ",,"
                     val row = "$ts,${"%.9f".format(Locale.US, lat)},${"%.9f".format(Locale.US, lon)},$ell,${f[9]},${f[11]},$q,$fixName,${f[7]},${f[8]},${f[13]},${f[14]},$crsCols"
                     lw.write(row + "\n"); lw.flush(); count++
+                    addFix(lat, lon, if (msl != null && sep != null) msl + sep else Double.NaN, q, f[8].toDoubleOrNull() ?: 1.0)
                     val mk = pendingMark
                     if (mk != null) { mw.write("$mk,$row\n"); mw.flush(); pendingMark = null }
                     latS = "%.9f".format(Locale.US, lat); lonS = "%.9f".format(Locale.US, lon); heightS = ell
@@ -177,7 +243,7 @@ object Session {
                     if (en != null) { crsS = en.spec; eS = String.format(Locale.US, fm, en.e); nS = String.format(Locale.US, fm, en.n) } else crsS = ""
                     val last = points.lastOrNull()
                     if (mk != null || last == null || last.q != q || abs(last.lat - lat) + abs(last.lon - lon) > 1e-7)
-                        synchronized(points) { points.add(Pt(lat, lon, q, mk != null)) }
+                        synchronized(points) { points.add(Pt(lat, lon, q, mk != null, sessNo)) }
                     message = ""
                     onUpdate?.invoke()
                 }

@@ -26,6 +26,9 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Overlay
 import java.io.File
 
+// one ring color per recording period, cycled (kept clear of green/orange)
+val PALETTE = intArrayOf(Color.rgb(30, 90, 255), Color.rgb(200, 0, 200), Color.rgb(0, 190, 210), Color.rgb(120, 60, 200),
+    Color.rgb(210, 30, 30), Color.rgb(120, 80, 40), Color.rgb(230, 60, 150), Color.rgb(0, 110, 120), Color.rgb(150, 150, 0))
 val COLOR_FIXED = Color.rgb(46, 204, 64)     // green  = RTK fixed
 val COLOR_FLOAT = Color.rgb(255, 140, 0)     // orange = RTK float
 val COLOR_OTHER = Color.rgb(140, 140, 140)   // gray   = autonomous / DGPS
@@ -109,6 +112,7 @@ class MainActivity : Activity() {
             append("$label   ")
         }
         dot("RTK fixed", COLOR_FIXED); dot("RTK float", COLOR_FLOAT); dot("other", COLOR_OTHER)
+        append("\n\u25C6 average    ring color = recording period")
     }
 
     @Suppress("DEPRECATION")
@@ -159,13 +163,14 @@ class MainActivity : Activity() {
     }
 }
 
-class PointsOverlay(private val pts: List<Session.Pt>, density: Float) : Overlay() {
+class PointsOverlay(private val pts: List<Session.Pt>, private val density: Float) : Overlay() {
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.5f * density; color = Color.WHITE }
-    private val markEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 3f * density; color = Color.BLACK }
+    private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.5f * density }
+    private val markEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.5f * density; color = Color.BLACK }
     private val r = 5f * density
     private val g = GeoPoint(0.0, 0.0)
     private val px = Point()
+    private val dia = Path()
 
     override fun draw(c: Canvas, map: MapView, shadow: Boolean) {
         if (shadow) return
@@ -177,10 +182,20 @@ class PointsOverlay(private val pts: List<Session.Pt>, density: Float) : Overlay
                 g.latitude = p.lat; g.longitude = p.lon
                 proj.toPixels(g, px)
                 if (px.x < -50 || px.y < -50 || px.x > map.width + 50 || px.y > map.height + 50) continue
+                val x = px.x.toFloat(); val y = px.y.toFloat()
+                val sc = PALETTE[p.sess % PALETTE.size]
+                if (p.avg) {   // weighted average of a stationary recording: diamond in the recording's color
+                    val d = r * 2.6f
+                    dia.rewind(); dia.moveTo(x, y - d); dia.lineTo(x + d, y); dia.lineTo(x, y + d); dia.lineTo(x - d, y); dia.close()
+                    fill.color = sc; c.drawPath(dia, fill); c.drawPath(dia, markEdge)
+                    fill.color = Color.WHITE; c.drawCircle(x, y, r * 0.5f, fill)
+                    continue
+                }
                 fill.color = when (p.q) { 4 -> COLOR_FIXED; 5 -> COLOR_FLOAT; else -> COLOR_OTHER }
-                val rad = if (i == n - 1) r * 1.8f else r
-                c.drawCircle(px.x.toFloat(), px.y.toFloat(), rad, fill)
-                c.drawCircle(px.x.toFloat(), px.y.toFloat(), rad, if (p.marked) markEdge else edge)
+                val rad = if (i == n - 1 && Session.running) r * 1.8f else r
+                c.drawCircle(x, y, rad, fill)
+                ring.color = sc; c.drawCircle(x, y, rad, ring)
+                if (p.marked) c.drawCircle(x, y, rad + 3f * density, markEdge)
             }
         }
     }

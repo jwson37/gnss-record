@@ -17,6 +17,7 @@ class SettingsActivity : Activity() {
     private lateinit var baud: EditText; private lateinit var host: EditText; private lateinit var port: EditText
     private lateinit var mount: EditText; private lateinit var user: EditText; private lateinit var pass: EditText
     private lateinit var tls: CheckBox
+    private lateinit var stat: EditText
     private lateinit var projSpinner: Spinner; private lateinit var customCrs: EditText; private lateinit var projInfo: TextView
     private lateinit var dxfBox: LinearLayout
     private var items: List<Session.Item> = emptyList()
@@ -61,6 +62,17 @@ class SettingsActivity : Activity() {
         pass = field(root, "Password", p.getString("pass", "")!!, true)
         tls = CheckBox(this).apply { text = "Use TLS"; isChecked = p.getBoolean("tls", false) }
         root.addView(tls)
+
+        label(root, "Averaging")
+        root.addView(TextView(this).apply {
+            text = "If a recording stays within this radius (95% of fixes), a weighted average (RTK fixed weighted most, by 1/HDOP^2) is saved to gnss_averages.csv and drawn as a diamond."
+            textSize = 12f
+        })
+        stat = field(root, "Stationary threshold (m)", p.getString("stat", "1.0")!!)
+        root.addView(Button(this).apply {
+            text = "Clear points from map"
+            setOnClickListener { synchronized(Session.points) { Session.points.clear() }; Toast.makeText(this@SettingsActivity, "Map points cleared", Toast.LENGTH_SHORT).show() }
+        })
 
         label(root, "Coordinate system (Esri WKID)")
         root.addView(TextView(this).apply {
@@ -170,7 +182,7 @@ class SettingsActivity : Activity() {
             .putString("baud", baud.text.toString()).putString("host", host.text.toString().trim())
             .putString("port", port.text.toString().trim()).putString("mount", mount.text.toString().trim())
             .putString("user", user.text.toString().trim()).putString("pass", pass.text.toString())
-            .putBoolean("tls", tls.isChecked)
+            .putBoolean("tls", tls.isChecked).putString("stat", stat.text.toString())
         items.getOrNull(spinner.selectedItemPosition)?.let { e.putString("dev", it.key) }
         e.apply()
         super.onPause()
