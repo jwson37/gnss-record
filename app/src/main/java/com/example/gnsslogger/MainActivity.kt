@@ -2,6 +2,7 @@ package com.example.gnsslogger
 
 import android.animation.ValueAnimator
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.*
@@ -37,6 +38,7 @@ class MainActivity : Activity() {
     private lateinit var map: MapView
     private lateinit var status: TextView
     private lateinit var rec: Button
+    private lateinit var poleBtn: Button
     private var blink: ValueAnimator? = null
     private var centered = false
 
@@ -90,6 +92,12 @@ class MainActivity : Activity() {
         val loc = circle("\u2316", Color.DKGRAY, 60, 24f)
         bottom.addView(mark); bottom.addView(rec); bottom.addView(loc)
         root.addView(bottom, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { bottomMargin = dp(28) })
+        poleBtn = Button(this).apply { textSize = 12f; setOnClickListener { editPole() } }
+        root.addView(poleBtn, FrameLayout.LayoutParams(WRAP_CONTENT, dp(40), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(140) })
+        val fit = circle("FIT", Color.DKGRAY, 52, 11f)   // tap: latest recording; long-press: everything
+        fit.setOnClickListener { zoomExtents(false) }
+        fit.setOnLongClickListener { zoomExtents(true); true }
+        root.addView(fit, FrameLayout.LayoutParams(dp(52), dp(52), Gravity.BOTTOM or Gravity.END).apply { bottomMargin = dp(150); rightMargin = dp(12) })
         setContentView(root)
 
         rec.setOnClickListener {
@@ -124,7 +132,7 @@ class MainActivity : Activity() {
     private fun refresh() {
         val s = Session
         status.text = if (s.running && s.message.isEmpty())
-            "${s.fixName} | sats ${s.sats} | HDOP ${s.hdop}\n${s.latS}, ${s.lonS}\nh ${s.heightS} m | NTRIP ${s.ntripStatus} | ${s.count} pts" +
+            "${s.fixName} | sats ${s.sats} | HDOP ${s.hdop}\n${s.latS}, ${s.lonS}\nh ${s.heightS} m${if (s.groundS.isNotEmpty()) "  ground ${s.groundS} m" else ""}\nNTRIP ${s.ntripStatus} | ${s.count} pts" +
                 (if (s.crsS.isNotEmpty() && s.crsS != "EPSG:4326") "\n${s.crsS}  E ${s.eS}  N ${s.nS}" else "")
         else if (s.running) "${s.message}\nNTRIP ${s.ntripStatus}" else s.message
         rec.text = if (s.running) "STOP" else "REC"
@@ -135,9 +143,47 @@ class MainActivity : Activity() {
         map.invalidate()
     }
 
+    /** Zoom to the extents of the latest recording (all = every recording plus visible DXF overlays). */
+    private fun zoomExtents(all: Boolean) {
+        var mnLa = 90.0; var mnLo = 180.0; var mxLa = -90.0; var mxLo = -180.0; var n = 0
+        synchronized(Session.points) {
+            val last = Session.points.maxOfOrNull { it.sess } ?: -1
+            for (p in Session.points) {
+                if (!all && p.sess != last) continue
+                mnLa = minOf(mnLa, p.lat); mxLa = maxOf(mxLa, p.lat); mnLo = minOf(mnLo, p.lon); mxLo = maxOf(mxLo, p.lon); n++
+            }
+        }
+        if (all) DxfStore.layers.filter { it.visible }.forEach { d ->
+            mnLa = minOf(mnLa, d.bbox[0]); mnLo = minOf(mnLo, d.bbox[1]); mxLa = maxOf(mxLa, d.bbox[2]); mxLo = maxOf(mxLo, d.bbox[3]); n++
+        }
+        if (n == 0) { Toast.makeText(this, "No recorded points yet", Toast.LENGTH_SHORT).show(); return }
+        val minSpan = 6e-5   // about 6 m, so a stationary recording is not zoomed out of reach
+        if (mxLa - mnLa < minSpan) { val c = (mxLa + mnLa) / 2; mnLa = c - minSpan / 2; mxLa = c + minSpan / 2 }
+        if (mxLo - mnLo < minSpan) { val c = (mxLo + mnLo) / 2; mnLo = c - minSpan / 2; mxLo = c + minSpan / 2 }
+        zoomTo(doubleArrayOf(mnLa, mnLo, mxLa, mxLo))
+    }
+
     private fun zoomTo(z: DoubleArray) {   // z = minLat, minLon, maxLat, maxLon
         if (z[2] - z[0] < 1e-6 && z[3] - z[1] < 1e-6) { map.controller.setZoom(19.0); map.controller.setCenter(GeoPoint(z[0], z[1])) }
-        else map.zoomToBoundingBox(BoundingBox(z[2], z[3], z[0], z[1]), false, dp(48))
+        else map.zoomToBoundingBox(BoundingBox(z[2], z[3], z[0], z[1]), false, dp(80))
+    }
+
+    private fun refreshPole() {
+        poleBtn.text = "Sensor height: " + Session.poleLabel(getSharedPreferences("cfg", Context.MODE_PRIVATE))
+    }
+
+    private fun editPole() {
+        if (Session.running) { Toast.makeText(this, "Stop recording to change the sensor height", Toast.LENGTH_SHORT).show(); return }
+        val p = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        val unit = Session.UNIT_NAMES[p.getInt("ahu", 0).coerceIn(0, 2)]
+        val e = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            setText(p.getString("ah", "0")); setSelectAllOnFocus(true)
+        }
+        AlertDialog.Builder(this).setTitle("Sensor height above ground ($unit)").setView(e)
+            .setPositiveButton("OK") { _, _ ->
+                p.edit().putString("ah", e.text.toString().trim().ifEmpty { "0" }).apply(); refreshPole()
+            }.setNegativeButton("Cancel", null).show()
     }
 
     private fun startBlink() {
@@ -153,6 +199,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume(); map.onResume()
         Session.onUpdate = { runOnUiThread { refresh() } }
+        refreshPole()
         val z = DxfStore.pendingZoom; DxfStore.pendingZoom = null
         if (z != null) { centered = true; map.post { zoomTo(z) } } else centered = false
         refresh()

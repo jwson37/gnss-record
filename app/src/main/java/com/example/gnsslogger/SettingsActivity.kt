@@ -1,6 +1,14 @@
 package com.example.gnsslogger
 
+import android.Manifest
 import android.app.Activity
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -18,6 +26,8 @@ class SettingsActivity : Activity() {
     private lateinit var mount: EditText; private lateinit var user: EditText; private lateinit var pass: EditText
     private lateinit var tls: CheckBox
     private lateinit var stat: EditText
+    private lateinit var poleH: EditText
+    private lateinit var poleUnit: Spinner
     private lateinit var projSpinner: Spinner; private lateinit var customCrs: EditText; private lateinit var projInfo: TextView
     private lateinit var dxfBox: LinearLayout
     private var items: List<Session.Item> = emptyList()
@@ -51,7 +61,8 @@ class SettingsActivity : Activity() {
 
         label(root, "GNSS receiver (USB OTG or paired Bluetooth)")
         spinner = Spinner(this); root.addView(spinner)
-        root.addView(Button(this).apply { text = "Refresh device list"; setOnClickListener { loadDevices(null) } })
+        root.addView(Button(this).apply { text = "Refresh device list"; setOnClickListener { loadDevices(items.getOrNull(spinner.selectedItemPosition)?.key) } })
+        root.addView(Button(this).apply { text = "Scan for BLE devices"; setOnClickListener { scanBle() } })
         baud = field(root, "USB baud rate", p.getString("baud", "115200")!!)
 
         label(root, "NTRIP correction service")
@@ -73,6 +84,23 @@ class SettingsActivity : Activity() {
             text = "Clear points from map"
             setOnClickListener { synchronized(Session.points) { Session.points.clear() }; Toast.makeText(this@SettingsActivity, "Map points cleared", Toast.LENGTH_SHORT).show() }
         })
+
+        label(root, "Sensor height")
+        root.addView(TextView(this).apply {
+            text = "Height from the ground mark to the antenna reference point (plumb pole assumed). It is subtracted to give ground heights in the CSV files. You can also change it on the map screen before each recording."
+            textSize = 12f
+        })
+        val hRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        poleH = EditText(this).apply {
+            hint = "e.g. 2.000"; setText(p.getString("ah", "0")); setSingleLine()
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED
+        }
+        poleUnit = Spinner(this).apply {
+            adapter = ArrayAdapter(this@SettingsActivity, android.R.layout.simple_spinner_dropdown_item, listOf("m", "ft (international)", "ftUS (survey)"))
+            setSelection(p.getInt("ahu", 0).coerceIn(0, 2))
+        }
+        hRow.addView(poleH, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)); hRow.addView(poleUnit)
+        root.addView(hRow)
 
         label(root, "Coordinate system (Esri WKID)")
         root.addView(TextView(this).apply {
@@ -169,8 +197,53 @@ class SettingsActivity : Activity() {
         }.start()
     }
 
+    // ---- BLE scan (needs Location permission + Location switched on, Android requirement) ----
+    private val found = LinkedHashMap<String, Session.Item>()
+    private var scanning = false
+    private val scanCb = object : ScanCallback() {
+        override fun onScanResult(type: Int, r: ScanResult) {
+            val name = r.device.name ?: r.scanRecord?.deviceName ?: return
+            val key = "ble:${r.device.address}"
+            found[key] = Session.Item(key, "BLE $name (${r.device.address}) ${r.rssi} dBm")
+        }
+        override fun onScanFailed(code: Int) {
+            Toast.makeText(this@SettingsActivity, "BLE scan failed ($code)", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun scanBle() {
+        val ad = BluetoothAdapter.getDefaultAdapter()
+        if (ad == null || !ad.isEnabled) { Toast.makeText(this, "Turn Bluetooth on first", Toast.LENGTH_SHORT).show(); return }
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 7); return
+        }
+        val sc = ad.bluetoothLeScanner ?: return
+        if (scanning) return
+        scanning = true
+        val keep = items.getOrNull(spinner.selectedItemPosition)?.key
+        Toast.makeText(this, "Scanning for BLE devices (8 s). Location must be on.", Toast.LENGTH_SHORT).show()
+        sc.startScan(scanCb)
+        Handler(Looper.getMainLooper()).postDelayed({
+            try { sc.stopScan(scanCb) } catch (_: Exception) {}
+            scanning = false
+            loadDevices(keep)
+        }, 8000)
+    }
+
+    override fun onRequestPermissionsResult(req: Int, perms: Array<out String>, res: IntArray) {
+        super.onRequestPermissionsResult(req, perms, res)
+        if (req == 7) {
+            if (res.firstOrNull() == PackageManager.PERMISSION_GRANTED) scanBle()
+            else Toast.makeText(this, "Location permission is required to scan for BLE devices", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun loadDevices(select: String?) {
-        items = Session.listDevices(this)
+        val l = ArrayList(Session.listDevices(this))
+        found.values.forEach { f -> if (l.none { it.key == f.key }) l.add(f) }
+        if (select != null && select.startsWith("ble:") && l.none { it.key == select })
+            l.add(Session.Item(select, "BLE saved device (${select.substring(4)})"))
+        items = l
         spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
             if (items.isEmpty()) listOf("No devices - plug in USB or pair Bluetooth, then Refresh") else items.map { it.label })
         items.indexOfFirst { it.key == select }.let { if (it >= 0) spinner.setSelection(it) }
@@ -183,6 +256,7 @@ class SettingsActivity : Activity() {
             .putString("port", port.text.toString().trim()).putString("mount", mount.text.toString().trim())
             .putString("user", user.text.toString().trim()).putString("pass", pass.text.toString())
             .putBoolean("tls", tls.isChecked).putString("stat", stat.text.toString())
+            .putString("ah", poleH.text.toString().trim().ifEmpty { "0" }).putInt("ahu", poleUnit.selectedItemPosition)
         items.getOrNull(spinner.selectedItemPosition)?.let { e.putString("dev", it.key) }
         e.apply()
         super.onPause()
