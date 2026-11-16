@@ -6,24 +6,31 @@ An Android app for surveying-style point capture with an **external GNSS receive
 
 ## Screens
 
-| Main screen, recording | Main screen, after STOP | Settings |
-|---|---|---|
-| ![Recording](docs/screen_main_recording.svg) | ![After stop](docs/screen_main_average.svg) | ![Settings](docs/screen_settings.svg) |
+| Main screen, recording | After STOP | Connection popup | Settings |
+|---|---|---|---|
+| ![Recording](docs/screen_main_recording.svg) | ![After stop](docs/screen_main_average.svg) | ![Connection popup](docs/screen_connection_popup.svg) | ![Settings](docs/screen_settings.svg) |
 
 ### Main screen (map)
 - OpenStreetMap background; zooms to your position on the first fix.
-- **Dots** are recorded points: **green** = RTK fixed, **orange** = RTK float, **gray** = anything else (GPS/DGPS).
-- **Ring color** around each dot = the **recording period** it belongs to. The color changes each time you start a new recording (cycles through 9 colors).
-- **Diamond** = the weighted average of a recording where the antenna stayed put (see [Averaging](#averaging-stationary-recordings)).
+- **Dots** are recorded points. The **ring** shows the fix quality: **green** = RTK fixed, **orange** = RTK float, **gray** = anything else (GPS/DGPS).
+- The **fill color** of a dot shows the **recording period** it belongs to. It changes each time you start a new recording (cycles through 9 colors).
+- A **scale bar** sits at the bottom left. It shows metres, or feet if the sensor height unit is ft or ftUS.
+- **Plus sign (+)** = the weighted average of a recording where the antenna stayed put (see [Averaging](#averaging-stationary-recordings)).
 - **Black outer ring** = a point you marked with MARK. The newest point is drawn larger while recording.
 - DXF drawings you imported are drawn underneath the points.
-- Top bar: fix type, satellites, HDOP, lat/lon (WGS84), ellipsoidal height, NTRIP status, point count, and easting/northing when a projected coordinate system is selected. The gear opens Settings.
+- **Status icons** at the top: a **receiver**, a **cloud** (NTRIP corrections) and a **satellite**.
+  - Receiver: grey = not connected, orange = connecting, green = connected (the label shows USB, BT or BLE).
+  - Cloud: grey = no NTRIP connection (or not configured), orange = connecting or retrying, green = receiving corrections.
+  - Satellite: grey = no fix, orange = float (or a non-RTK fix), green = RTK fixed (the label shows the satellite count).
+  - Tapping any icon opens the **connection popup**: Connect/Disconnect, receiver dropdown, baud rate dropdown (USB) and instrument height with its unit. *More settings* opens the full Settings screen (NTRIP login, BLE scan, and so on).
+- Below the icons: your position (lat/lon, WGS84) in large type that fills the screen width, then ellipsoidal and ground height, NTRIP status, point count, and easting/northing when a projected coordinate system is selected. Fix type shows in the satellite icon color and the satellite count in its label; HDOP is in the CSV files. The gear opens Settings.
+- **Connecting and recording are separate.** Connect first to watch the icons turn green and wait for an RTK fix. **REC** then starts a recording period, and **STOP** ends it while staying connected. If you press REC while disconnected it connects first.
 - A **Sensor height** button above the record buttons shows the current pole height and lets you change it between recordings.
 - Bottom buttons: **MARK** (save a named point), **REC / STOP** (start or stop recording; it **vibrates** and **blinks** while recording), **⌖** (recenter on your position).
 - **FIT** (right side) zooms the map to the extents of the latest recording. Long-press it to fit everything: all recordings plus visible DXF overlays.
 
 ### Settings
-Receiver, NTRIP login, sensor height, coordinate system, averaging threshold, DXF overlays. Changes are saved automatically and apply the next time you press REC.
+Receiver, NTRIP login, sensor height, coordinate system, averaging threshold, DXF overlays. Changes are saved automatically and apply the next time you connect or press REC.
 
 ## Quick start
 
@@ -32,8 +39,8 @@ Receiver, NTRIP login, sensor height, coordinate system, averaging threshold, DX
    - *Bluetooth LE:* no pairing needed. In Settings tap *Scan for BLE devices* (Android asks for Location permission, and Location must be on), then pick the receiver.
    - *USB:* connect with a USB-C OTG adapter. Use a powered hub if the receiver draws more than the phone can supply.
 2. **Receiver setup:** enable **GGA** and **RMC** NMEA output on the port you use, and allow **RTCM3** input on the same port (on u-blox, enable these on the USB or UART protocol settings).
-3. Open the app → gear → choose the receiver (tap *Refresh device list* after plugging in), enter the NTRIP host/port/mountpoint/user/password, and pick a coordinate system.
-4. Back on the map, tap **REC**. The first time over USB, Android asks for permission to use the device. Tick "always".
+3. Open Settings (gear) and enter the NTRIP host/port/mountpoint/user/password and your coordinate system. Then tap any status icon at the top, pick the receiver (and baud rate for USB), and tap **Connect**.
+4. Wait for the icons to turn green (the satellite icon is green at RTK fixed), then tap **REC**. The first time over USB, Android asks for permission to use the device. Tick "always".
 5. Walk, or stay still on a point. Tap **MARK** to save named points (P1, P2, …). Tap **STOP** when done.
 
 ## Output files
@@ -79,7 +86,7 @@ When you press **STOP** and the antenna stayed put, the app saves a **weighted a
 
 - "Stayed put" means 95% of the fixes are within the *stationary threshold* of the average (default **1.0 m**, set in Settings) and there are at least 5 fixes.
 - Weights favor quality: RTK fixed counts most, RTK float much less, DGPS/GPS barely at all, each divided by HDOP².
-- The result is appended to `gnss_averages.csv` and drawn as a **diamond** in the recording's color. The status bar reports the number of fixes and the standard deviation, or "Moved too much to average" with the measured radius.
+- The result is appended to `gnss_averages.csv` and drawn as a **plus sign (+)** in the recording's color. The status bar reports the number of fixes and the standard deviation, or "Moved too much to average" with the measured radius.
 
 ## Building
 
