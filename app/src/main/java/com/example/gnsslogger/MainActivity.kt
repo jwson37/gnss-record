@@ -8,6 +8,8 @@ import android.content.Intent
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -44,6 +46,8 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var rec: Button
     private lateinit var poleBtn: Button
+    private val ticker = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable { override fun run() { Session.sampleRates(); refresh(); ticker.postDelayed(this, 1000) } }
     private lateinit var llText: TextView
     private lateinit var icRx: StatusIcon
     private lateinit var icNt: StatusIcon
@@ -77,7 +81,7 @@ class MainActivity : Activity() {
             overlays.add(PointsOverlay(Session.points, resources.displayMetrics.density))
             val dens = resources.displayMetrics.density
             scaleBar = ScaleBarOverlay(this).apply {
-                setAlignBottom(true); setScaleBarOffset(12f * dens, 110f * dens); setLineWidth(2f * dens)
+                setAlignBottom(true); setScaleBarOffset((12f * dens).toInt(), (110f * dens).toInt()); setLineWidth(2f * dens)
                 setTextPaint(Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; textSize = 12f * dens })
             }
             overlays.add(scaleBar)
@@ -94,7 +98,7 @@ class MainActivity : Activity() {
         val iconRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         for (ic in listOf(icRx, icNt, icSat)) {
             ic.setOnClickListener { showConnectionDialog() }
-            iconRow.addView(ic, LinearLayout.LayoutParams(dp(60), dp(56)))
+            iconRow.addView(ic, LinearLayout.LayoutParams(dp(58), dp(50)))
         }
         iconRow.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         iconRow.addView(Button(this).apply {
@@ -150,6 +154,7 @@ class MainActivity : Activity() {
             s.running && s.message.isEmpty() ->
                 "h ${s.heightS} m${if (s.groundS.isNotEmpty()) "  ground ${s.groundS} m" else ""}\n" +
                     "NTRIP ${s.ntripStatus} | " + (if (s.recording) "REC ${s.count} pts" else "not recording") +
+                    "\nRX ${fmtBps(s.rxBps)} bps | RTCM ${fmtBps(s.ntBps)} bps" +
                     (if (s.crsS.isNotEmpty() && s.crsS != "EPSG:4326") "\n${s.crsS}  E ${s.eS}  N ${s.nS}" else "")
             s.running -> "${s.message}\nNTRIP ${s.ntripStatus}"
             else -> s.message
@@ -221,12 +226,14 @@ class MainActivity : Activity() {
 
     private fun updateIcons() {
         val s = Session
-        icRx.set(when (s.linkState) { 2 -> ICON_GREEN; 1 -> ICON_ORANGE; else -> ICON_GREY }, if (s.linkState == 2) s.linkType else "")
+        icRx.set(when (s.linkState) { 2 -> ICON_GREEN; 1 -> ICON_ORANGE; else -> ICON_GREY },
+            when (s.linkState) { 2 -> fmtBps(s.rxBps); 1 -> "..."; else -> "" })
         val nt = s.ntripStatus
         icNt.set(when { nt == "streaming" -> ICON_GREEN; nt == "connecting" || nt.startsWith("error") -> ICON_ORANGE; else -> ICON_GREY },
-            when { nt == "streaming" -> "RTCM"; nt == "connecting" -> "..."; nt.startsWith("error") -> "retry"; else -> "" })
+            when { nt == "streaming" -> fmtBps(s.ntBps); nt == "connecting" -> "..."; nt.startsWith("error") -> "ERR"; else -> "" })
+        val used = s.sats.toIntOrNull()
         icSat.set(when { s.linkState != 2 || s.fixQ == 0 -> ICON_GREY; s.fixQ == 4 -> ICON_GREEN; else -> ICON_ORANGE },
-            if (s.linkState == 2) s.sats else "")
+            if (s.linkState != 2 || used == null) "" else if (s.seen > 0) "$used/${maxOf(s.seen, used)}" else "$used")
     }
 
     // scale bar units follow the sensor-height unit: m -> metric, ft / ftUS -> imperial
@@ -254,7 +261,7 @@ class MainActivity : Activity() {
             typeface = Typeface.MONOSPACE; textSize = 12f; setTextColor(Color.BLACK)
             text = "Receiver:   ${when (s.linkState) { 2 -> "connected (${s.linkType})"; 1 -> "connecting..."; else -> "not connected" }}\n" +
                 "NTRIP:      ${s.ntripStatus}\n" +
-                "Satellites: ${if (s.linkState == 2) "${s.fixName}, ${s.sats} sats" else "-"}"
+                "Satellites: ${if (s.linkState == 2) "${s.fixName}, ${s.sats} used" + (if (s.seen > 0) " / ${s.seen} seen" else "") else "-"}"
         })
         label("Receiver")
         val devSpin = Spinner(this).apply {
@@ -320,13 +327,14 @@ class MainActivity : Activity() {
         super.onResume(); map.onResume()
         Session.onUpdate = { runOnUiThread { refresh() } }
         refreshPole(); applyScaleUnits()
+        ticker.removeCallbacks(tick); ticker.post(tick)
         val z = DxfStore.pendingZoom; DxfStore.pendingZoom = null
         if (z != null) { centered = true; map.post { zoomTo(z) } } else centered = false
         refresh()
     }
 
     override fun onPause() {
-        Session.onUpdate = null; stopBlink(); map.onPause(); super.onPause()
+        ticker.removeCallbacks(tick); Session.onUpdate = null; stopBlink(); map.onPause(); super.onPause()
     }
 }
 
@@ -372,48 +380,67 @@ class PointsOverlay(private val pts: List<Session.Pt>, private val density: Floa
     }
 }
 
-/** Status icon: kind 0 = receiver, 1 = cloud (NTRIP), 2 = satellite. Grey / green / orange, with a tiny label. */
+/** Data rate in bits per second, short form: 950, 4.8k, 12k, 1.2M. */
+fun fmtBps(b: Int): String = when {
+    b >= 1_000_000 -> String.format(java.util.Locale.US, "%.1fM", b / 1e6)
+    b >= 10_000 -> "${b / 1000}k"
+    b >= 1_000 -> String.format(java.util.Locale.US, "%.1fk", b / 1000.0)
+    else -> "$b"
+}
+
+/** Status icon: kind 0 = receiver, 1 = cloud (NTRIP), 2 = satellite. Grey / green / orange, text drawn inside the icon. */
 class StatusIcon(ctx: Context, private val kind: Int) : View(ctx) {
     private var color = ICON_GREY
     private var label = ""
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textAlign = Paint.Align.CENTER; textSize = 11f * ctx.resources.displayMetrics.density
-        typeface = Typeface.DEFAULT_BOLD; color = Color.DKGRAY
+        textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD; color = Color.WHITE
     }
 
     fun set(c: Int, l: String) { if (c != color || l != label) { color = c; label = l; invalidate() } }
 
+    /** Text centred at cx, shrunk to fit maxW (everything in the 48-unit icon grid). */
+    private fun txt(c: Canvas, t: String, cx: Float, base: Float, size: Float, maxW: Float) {
+        tp.textSize = size
+        val w = tp.measureText(t)
+        if (w > maxW) tp.textSize = size * maxW / w
+        c.drawText(t, cx, base, tp)
+    }
+
     override fun onDraw(c: Canvas) {
         val w = width.toFloat(); val h = height.toFloat()
-        val s = minOf(w, h - tp.textSize - 4f)
-        c.save(); c.translate((w - s) / 2f, 2f); c.scale(s / 48f, s / 48f)
+        val s = minOf(w, h) - 2f
+        c.save(); c.translate((w - s) / 2f, (h - s) / 2f); c.scale(s / 48f, s / 48f)
         p.color = color; p.style = Paint.Style.FILL; p.strokeWidth = 3f; p.strokeCap = Paint.Cap.ROUND
         when (kind) {
-            0 -> {   // survey GNSS receiver: dome, band, base, pole
-                c.drawArc(RectF(8f, 10f, 40f, 42f), 180f, 180f, true, p)
-                c.drawRoundRect(RectF(6f, 28f, 42f, 36f), 3f, 3f, p)
-                c.drawRoundRect(RectF(21f, 36f, 27f, 45f), 1f, 1f, p)
+            0 -> {   // survey GNSS receiver: dome, band, base, pole. Text sits in the dome.
+                c.drawArc(RectF(6f, 8f, 42f, 44f), 180f, 180f, true, p)
+                c.drawRoundRect(RectF(4f, 28f, 44f, 35f), 3f, 3f, p)
+                c.drawRoundRect(RectF(21f, 35f, 27f, 46f), 1f, 1f, p)
                 p.color = Color.WHITE
-                c.drawCircle(14f, 32f, 1.5f, p); c.drawCircle(24f, 32f, 1.5f, p); c.drawCircle(34f, 32f, 1.5f, p)
+                c.drawCircle(11f, 31.5f, 1.3f, p); c.drawCircle(24f, 31.5f, 1.3f, p); c.drawCircle(37f, 31.5f, 1.3f, p)
+                if (label.isNotEmpty()) txt(c, label, 24f, 23f, 11f, 28f)
             }
             1 -> {   // cloud
                 c.drawCircle(15f, 31f, 8f, p); c.drawCircle(25f, 23f, 11f, p); c.drawCircle(35f, 30f, 8f, p)
                 c.drawRect(15f, 31f, 35f, 39f, p)
+                if (label.isNotEmpty()) txt(c, label, 25f, 34f, 11f, 28f)
             }
-            else -> {   // satellite
-                c.save(); c.rotate(-45f, 24f, 24f)
-                c.drawRoundRect(RectF(18f, 15f, 30f, 33f), 2f, 2f, p)
-                c.drawRect(3f, 19f, 16f, 29f, p); c.drawRect(32f, 19f, 45f, 29f, p)
-                p.style = Paint.Style.STROKE; c.drawLine(24f, 33f, 24f, 39f, p); p.style = Paint.Style.FILL
-                c.drawCircle(24f, 41f, 3f, p)
-                p.color = Color.WHITE; p.strokeWidth = 1.2f; p.style = Paint.Style.STROKE
-                c.drawLine(7.3f, 19f, 7.3f, 29f, p); c.drawLine(11.7f, 19f, 11.7f, 29f, p)
-                c.drawLine(36.3f, 19f, 36.3f, 29f, p); c.drawLine(40.7f, 19f, 40.7f, 29f, p)
-                c.restore()
+            else -> {   // satellite: body with solar panels. Text sits in the body: used over seen.
+                c.drawRect(1f, 17f, 12f, 31f, p); c.drawRect(36f, 17f, 47f, 31f, p)
+                c.drawRoundRect(RectF(13f, 12f, 35f, 38f), 3f, 3f, p)
+                p.style = Paint.Style.STROKE; c.drawLine(24f, 12f, 24f, 7f, p); p.style = Paint.Style.FILL
+                c.drawCircle(24f, 5.5f, 3f, p)
+                p.color = Color.WHITE; p.strokeWidth = 1f; p.style = Paint.Style.STROKE
+                c.drawLine(6.5f, 17f, 6.5f, 31f, p); c.drawLine(41.5f, 17f, 41.5f, 31f, p)
+                c.drawLine(1f, 24f, 12f, 24f, p); c.drawLine(36f, 24f, 47f, 24f, p)
+                val parts = label.split("/")
+                if (parts.size == 2) {
+                    txt(c, parts[0], 24f, 24f, 10.5f, 19f); txt(c, parts[1], 24f, 36f, 10.5f, 19f)
+                    p.strokeWidth = 1.2f; c.drawLine(17f, 26.5f, 31f, 26.5f, p)
+                } else if (label.isNotEmpty()) txt(c, label, 24f, 29f, 12f, 19f)
             }
         }
         c.restore()
-        if (label.isNotEmpty()) c.drawText(label, w / 2f, h - 3f, tp)
     }
 }

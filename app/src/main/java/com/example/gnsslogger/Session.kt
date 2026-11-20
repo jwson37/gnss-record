@@ -41,6 +41,12 @@ object Session {
     @Volatile var linkState = 0              // 0 off, 1 connecting, 2 connected
     @Volatile var linkType = ""              // USB / BT / BLE
     @Volatile var fixQ = 0                   // latest GGA fix quality
+    @Volatile var seen = 0                   // satellites in view (sum of GSV totals over constellations)
+    @Volatile var rxBytes = 0L               // bytes received from the receiver
+    @Volatile var rxBps = 0                  // receiver data rate, bits per second
+    @Volatile var ntBps = 0                  // NTRIP/RTCM data rate, bits per second
+    private val seenTmp = HashMap<String, Int>()
+    private var lastRx = 0L; private var lastTx = 0L; private var lastT = 0L
     @Volatile var note = ""                  // result of the last recording
     @Volatile private var cfg: Cfg? = null
     private val recLock = Any()
@@ -99,6 +105,18 @@ object Session {
 
     private const val HEADER = "utc_time,lat_wgs84_deg,lon_wgs84_deg,ellipsoidal_height_m,msl_altitude_m,geoid_sep_m,fix_quality,fix_name,satellites,hdop,diff_age_s,diff_station,crs,easting,northing,sensor_height_m,ground_ellipsoidal_m,ground_msl_m"
 
+    /** Called about once a second by the UI: updates the data rates in bits per second. */
+    fun sampleRates() {
+        val now = System.currentTimeMillis()
+        val dt = (now - lastT).coerceAtLeast(1L)
+        if (lastT != 0L) {
+            rxBps = ((rxBytes - lastRx) * 8000L / dt).toInt().coerceAtLeast(0)
+            ntBps = ((rtcmBytes - lastTx) * 8000L / dt).toInt().coerceAtLeast(0)
+        }
+        lastRx = rxBytes; lastTx = rtcmBytes; lastT = now
+        if (!running) { rxBps = 0; ntBps = 0 }
+    }
+
     fun refreshPole(ctx: Context) {
         if (!recording) sessPole = poleMeters(ctx.applicationContext.getSharedPreferences("cfg", Context.MODE_PRIVATE))
     }
@@ -116,7 +134,8 @@ object Session {
             p.getBoolean("tls", false), p.getString("crs", "EPSG:4326")!!)
         cfg = c
         sessPole = poleMeters(p); groundS = ""
-        rtcmBytes = 0; fixName = "no fix"; fixQ = 0; sats = "-"; hdop = "-"
+        rtcmBytes = 0; rxBytes = 0; seen = 0; seenTmp.clear(); lastRx = 0; lastTx = 0; lastT = 0; rxBps = 0; ntBps = 0
+        fixName = "no fix"; fixQ = 0; sats = "-"; hdop = "-"
         lastLat = Double.NaN; lastLon = Double.NaN
         linkType = when { dev.startsWith("usb:") -> "USB"; dev.startsWith("ble:") -> "BLE"; else -> "BT" }
         linkState = 1; message = "Connecting..."; running = true
@@ -178,7 +197,7 @@ object Session {
         try { link?.close() } catch (_: Exception) {}
         link = null
         try { ntripSock?.close() } catch (_: Exception) {}
-        ntripStatus = "idle"; linkState = 0; fixQ = 0; fixName = "no fix"; sats = "-"
+        ntripStatus = "idle"; linkState = 0; fixQ = 0; fixName = "no fix"; sats = "-"; seen = 0
         if (wasRec) note = "Recording stopped - $count points saved$tail"
         message = reason ?: if (wasRunning) "Disconnected" else message
         onUpdate?.invoke()
@@ -408,7 +427,11 @@ object Session {
                 val kind = f[0].takeLast(3)
                 if (kind == "RMC" && f.size > 9 && f[9].length == 6) {
                     val d = f[9]; rmcDate = "20${d.substring(4, 6)}-${d.substring(2, 4)}-${d.substring(0, 2)}"
+                } else if (kind == "GSV" && f.size > 3) {
+                    val tot = f[3].toIntOrNull()
+                    if (tot != null) { val tk = f[0].dropLast(3); seenTmp[tk] = maxOf(seenTmp[tk] ?: 0, tot) }
                 } else if (kind == "GGA" && f.size > 14) {
+                    seen = seenTmp.values.sum(); seenTmp.clear()
                     lastGga = line + "\r\n"
                     val q = f[6].toIntOrNull() ?: 0
                     sats = f[7]; hdop = f[8]; fixName = FIX[q] ?: q.toString(); fixQ = q
@@ -453,6 +476,7 @@ object Session {
                 val n = l.read(buf)
                 if (n < 0) break
                 if (n == 0) continue
+                rxBytes += n
                 sb.append(String(buf, 0, n, Charsets.ISO_8859_1))
                 while (true) {
                     val i = sb.indexOf("\n"); if (i < 0) break

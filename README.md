@@ -19,11 +19,11 @@ An Android app for surveying-style point capture with an **external GNSS receive
 - **Black outer ring** = a point you marked with MARK. The newest point is drawn larger while recording.
 - DXF drawings you imported are drawn underneath the points.
 - **Status icons** at the top: a **receiver**, a **cloud** (NTRIP corrections) and a **satellite**.
-  - Receiver: grey = not connected, orange = connecting, green = connected (the label shows USB, BT or BLE).
-  - Cloud: grey = no NTRIP connection (or not configured), orange = connecting or retrying, green = receiving corrections.
-  - Satellite: grey = no fix, orange = float (or a non-RTK fix), green = RTK fixed (the label shows the satellite count).
+  - Receiver: grey = not connected, orange = connecting, green = connected. The number inside is the data rate coming from the receiver, in bits per second (4.8k = 4800 bps).
+  - Cloud: grey = no NTRIP connection (or not configured), orange = connecting or retrying, green = receiving corrections. The number inside is the RTCM data rate in bits per second.
+  - Satellite: grey = no fix, orange = float (or a non-RTK fix), green = RTK fixed. Inside: satellites used over satellites seen (for example 24 over 31). "Seen" needs GSV output from the receiver; without it only the used count is shown.
   - Tapping any icon opens the **connection popup**: Connect/Disconnect, receiver dropdown, baud rate dropdown (USB) and instrument height with its unit. *More settings* opens the full Settings screen (NTRIP login, BLE scan, and so on).
-- Below the icons: your position (lat/lon, WGS84) in large type that fills the screen width, then ellipsoidal and ground height, NTRIP status, point count, and easting/northing when a projected coordinate system is selected. Fix type shows in the satellite icon color and the satellite count in its label; HDOP is in the CSV files. The gear opens Settings.
+- Below the icons: your position (lat/lon, WGS84) in large type that fills the screen width, then ellipsoidal and ground height, NTRIP status, point count, receiver and RTCM data rates (bits per second), and easting/northing when a projected coordinate system is selected. Fix type shows in the satellite icon color and the satellite count in its label; HDOP is in the CSV files. The gear opens Settings.
 - **Connecting and recording are separate.** Connect first to watch the icons turn green and wait for an RTK fix. **REC** then starts a recording period, and **STOP** ends it while staying connected. If you press REC while disconnected it connects first.
 - A **Sensor height** button above the record buttons shows the current pole height and lets you change it between recordings.
 - Bottom buttons: **MARK** (save a named point), **REC / STOP** (start or stop recording; it **vibrates** and **blinks** while recording), **⌖** (recenter on your position).
@@ -38,7 +38,7 @@ Receiver, NTRIP login, sensor height, coordinate system, averaging threshold, DX
    - *Bluetooth (classic):* pair it in Android Settings first.
    - *Bluetooth LE:* no pairing needed. In Settings tap *Scan for BLE devices* (Android asks for Location permission, and Location must be on), then pick the receiver.
    - *USB:* connect with a USB-C OTG adapter. Use a powered hub if the receiver draws more than the phone can supply.
-2. **Receiver setup:** enable **GGA** and **RMC** NMEA output on the port you use, and allow **RTCM3** input on the same port (on u-blox, enable these on the USB or UART protocol settings).
+2. **Receiver setup:** enable **GGA**, **RMC** and **GSV** (satellites in view) NMEA output on the port you use, and allow **RTCM3** input on the same port (on u-blox, enable these on the USB or UART protocol settings).
 3. Open Settings (gear) and enter the NTRIP host/port/mountpoint/user/password and your coordinate system. Then tap any status icon at the top, pick the receiver (and baud rate for USB), and tap **Connect**.
 4. Wait for the icons to turn green (the satellite icon is green at RTK fixed), then tap **REC**. The first time over USB, Android asks for permission to use the device. Tick "always".
 5. Walk, or stay still on a point. Tap **MARK** to save named points (P1, P2, …). Tap **STOP** when done.
